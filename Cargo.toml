@@ -1,0 +1,29 @@
+[package]
+name = "arvo-plugin-alpaca"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Alpaca as an Arvo source plugin: a thin binary over arvo-alpaca, served over gRPC, keys handed per call (ADR-0022)."
+repository = "https://github.com/wjpin84/arvo-plugin-alpaca"
+
+# Its own workspace root, so cargo never adopts a manifest from a parent
+# directory.
+[workspace]
+
+[[bin]]
+name = "arvo-plugin-alpaca"
+path = "src/main.rs"
+
+[dependencies]
+# The host half of the boundary: the proto, the server helper, and the
+# manifest. The branch pin moves to a tag once the source proto is on master.
+arvo-plugin-host = { git = "https://github.com/wjpin84/arvo-desktop.git", branch = "editor-plan" }
+# Everything Alpaca-specific. This crate adds a process boundary and nothing else.
+arvo-alpaca = { git = "https://github.com/wjpin84/arvo-desktop.git", branch = "editor-plan" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+# The trait, for the test that compares the served sources with the compiled-in ones.
+arvo-data = { git = "https://github.com/wjpin84/arvo-desktop.git", branch = "editor-plan" }
+# A date to ask for bars on; the trait takes chrono's.
+chrono = { version = "0.4", default-features = false }

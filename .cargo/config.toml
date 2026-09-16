@@ -1,0 +1,4 @@
+# The host crates come from a private repository. libgit2 cannot use the
+# system's credential helper; the git CLI can.
+[net]
+git-fetch-with-cli = true
