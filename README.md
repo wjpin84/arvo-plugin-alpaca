@@ -63,12 +63,24 @@ rebuilds the variant on its side, so `needs_sign_in` survives the boundary.
 
 ## Installing from GitHub
 
-`arvo-extension.json` declares this repository as a provider extension
-(ADR-0024). Arvo's installer currently refuses provider extensions on purpose:
-a provider is code, and Arvo will not fetch and run code until its supervisor
-(ADR-0023) can own the process. When that lands, Arvo will clone this
-repository at a pinned commit and start the binary itself. Until then, the two
-steps above are the install.
+`arvo-extension.json` declares this repository as a provider extension with
+its recipe (ADR-0025):
+
+```json
+"build": "cargo build --release",
+"run": "target/release/arvo-plugin-alpaca"
+```
+
+Paste `wjpin84/arvo-plugin-alpaca` into Arvo's Extensions view. Install clones
+the repository at a pinned commit and runs nothing. The extension then shows
+the recipe verbatim with a Build button; confirming runs the build in the
+extension's own folder with its output in the Output panel, and copies the
+binary into a cache Arvo owns. The Extensions view says whether it built.
+
+Starting it is the one step Arvo does not do yet: that is the supervisor
+(ADR-0023), which will launch the cached binary itself and register it. Until
+it lands, run the cached binary by hand, or the two steps above, and list its
+address in `plugins.toml`.
 
 ## Building this repository
 
