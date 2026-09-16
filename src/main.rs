@@ -30,7 +30,7 @@ fn keys_from(grant: Option<&Grant>) -> Option<Keys> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = std::env::var("ARVO_PLUGIN_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned()).parse()?;
     let plugin = Served::with_grants("alpaca", "Alpaca", env!("CARGO_PKG_VERSION"), |grant| {
         let keys = keys_from(grant);
@@ -41,7 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Box::new(Alpaca::sip_total_return().with_keys(keys)),
         ]
     });
-    println!("arvo-plugin-alpaca serving {SERVICE} at {addr}");
+    // stderr, not stdout: stdout's first line is the handshake `serve` prints
+    // once it is listening, which Arvo's supervisor reads (ADR-0023).
+    eprintln!("arvo-plugin-alpaca serving {SERVICE} at {addr}");
     serve(addr, plugin).await?;
     Ok(())
 }

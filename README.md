@@ -45,6 +45,11 @@ id = "alpaca"
 address = "http://127.0.0.1:50053"
 ```
 
+Or let Arvo start it: `command = "path/to/arvo-plugin-alpaca"` in place of
+`address`, and Arvo launches it on a port of its own choosing, restarts it if
+it dies, and stops it when Arvo quits. Either way it is the same plugin in the
+same registry.
+
 Arvo probes it at launch and every thirty seconds. The Extensions view shows it
 under Providers as Reachable, and Fetch offers the four Alpaca sources. When the
 plugin is running, it serves in place of the compiled-in Alpaca; when it is
@@ -77,10 +82,10 @@ the recipe verbatim with a Build button; confirming runs the build in the
 extension's own folder with its output in the Output panel, and copies the
 binary into a cache Arvo owns. The Extensions view says whether it built.
 
-Starting it is the one step Arvo does not do yet: that is the supervisor
-(ADR-0023), which will launch the cached binary itself and register it. Until
-it lands, run the cached binary by hand, or the two steps above, and list its
-address in `plugins.toml`.
+Once built, Arvo starts it itself (ADR-0023): the binary is launched from the
+cache on a port of Arvo's choosing, appears under Providers, is restarted a few
+times if it dies and then reported, and is stopped when the extension is
+disabled or removed and when Arvo quits. Nothing goes in `plugins.toml`.
 
 ## Building this repository
 
