@@ -89,8 +89,7 @@ disabled or removed and when Arvo quits. Nothing goes in `plugins.toml`.
 
 ## Building this repository
 
-The host crates are git dependencies on `arvo-desktop`, pinned to a branch
-until the source proto reaches `master`, when the pin becomes a tag.
+The host crates are git dependencies on `arvo-desktop`, pinned to a tag.
 `arvo-desktop` is private, so building needs read access to it; `.cargo/config.toml`
 makes cargo fetch with the git CLI so your credential helper is used.
 

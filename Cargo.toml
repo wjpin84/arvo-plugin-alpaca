@@ -16,14 +16,14 @@ path = "src/main.rs"
 
 [dependencies]
 # The host half of the boundary: the proto, the server helper, and the
-# manifest. The branch pin moves to a tag once the source proto is on master.
-arvo-plugin-host = { git = "https://github.com/wjpin84/arvo-desktop.git", branch = "editor-plan" }
+# manifest. Pinned to the tag this plugin was built against.
+arvo-plugin-host = { git = "https://github.com/wjpin84/arvo-desktop.git", tag = "v0.1.0" }
 # Everything Alpaca-specific. This crate adds a process boundary and nothing else.
-arvo-alpaca = { git = "https://github.com/wjpin84/arvo-desktop.git", branch = "editor-plan" }
+arvo-alpaca = { git = "https://github.com/wjpin84/arvo-desktop.git", tag = "v0.1.0" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
 # The trait, for the test that compares the served sources with the compiled-in ones.
-arvo-data = { git = "https://github.com/wjpin84/arvo-desktop.git", branch = "editor-plan" }
+arvo-data = { git = "https://github.com/wjpin84/arvo-desktop.git", tag = "v0.1.0" }
 # A date to ask for bars on; the trait takes chrono's.
 chrono = { version = "0.4", default-features = false }
