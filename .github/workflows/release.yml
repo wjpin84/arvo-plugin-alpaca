@@ -1,0 +1,152 @@
+name: Release
+
+# What lands on main is what people install. Every merge builds the binary
+# for every platform Arvo runs on; a merge that also moved the version in
+# Cargo.toml publishes them as a release.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide what the others produced.
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          # Both Macs: the runner is Apple silicon, and an Intel Mac is
+          # still a machine someone installs Arvo on.
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reach the private host crate
+        shell: bash
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ secrets.ARVO_DESKTOP_TOKEN }}@github.com/".insteadOf \
+            "https://github.com/"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.target }}-
+
+      - name: Build
+        shell: bash
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked --target ${{ matrix.target }}
+
+      # Named the way Arvo's installer looks for it: the binary, then the
+      # triple it was built for (#178 in arvo-desktop).
+      - name: Name it for the target it was built for
+        shell: bash
+        run: |
+          binary="${GITHUB_REPOSITORY##*/}"
+          suffix=""
+          [[ "${{ matrix.target }}" == *windows* ]] && suffix=".exe"
+          mkdir -p staged
+          cp "target/${{ matrix.target }}/release/${binary}${suffix}" \
+             "staged/${binary}-${{ matrix.target }}${suffix}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: staged/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          merge-multiple: true
+
+      # The version in Cargo.toml is the release. Read with sed rather than
+      # `cargo metadata`, which would want the private dependency resolved
+      # just to answer what this package calls itself.
+      - name: Read the version
+        id: version
+        run: |
+          version=$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          if gh release view "v${version}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Checksums
+        run: |
+          cd staged
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      # A release already published is never overwritten: someone may have
+      # installed from it, and Arvo checks these binaries against the
+      # checksum its manifest states. Move the version in Cargo.toml to cut
+      # a new one; the artifacts of this run are on the run either way.
+      - name: Publish
+        if: steps.version.outputs.exists == 'false'
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" staged/* \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes "Built from ${GITHUB_SHA}. Each binary is named for the target triple it was built for; \`checksums.txt\` holds the SHA-256 Arvo verifies on install."
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # What to paste into `arvo-extension.json` so an installed Arvo takes
+      # these binaries instead of building from source.
+      - name: The manifest block for these assets
+        run: |
+          binary="${GITHUB_REPOSITORY##*/}"
+          tag="${{ steps.version.outputs.tag }}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
+          {
+            echo '### `assets` for `arvo-extension.json`'
+            echo
+            echo '```json'
+            echo '"assets": ['
+            first=1
+            while read -r sum file; do
+              [ "$file" = "checksums.txt" ] && continue
+              target="${file#"${binary}-"}"
+              target="${target%.exe}"
+              [ $first -eq 0 ] && echo ','
+              first=0
+              printf '  { "target": "%s", "url": "%s/%s", "sha256": "%s" }' \
+                "$target" "$base" "$file" "$sum"
+            done < staged/checksums.txt
+            echo
+            echo ']'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
