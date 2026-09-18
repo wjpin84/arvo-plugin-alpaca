@@ -121,3 +121,20 @@ repository it runs in:
 Set it with `gh secret set ARVO_DESKTOP_TOKEN --repo wjpin84/REPO`. Without
 it the build cannot resolve its dependencies, and it is also why a pull
 request from a fork cannot be built: a fork's run gets no secrets.
+
+### Versioning
+
+`version` in `Cargo.toml` is the only number that decides anything. CI
+refuses a pull request where it disagrees with `arvo-extension.json` — that
+is the number Arvo's Extensions view shows — and refuses one that changes
+`src`, `tests` or the manifests without moving it.
+
+A merge to `main` publishes `v<version>` when no such release exists, and
+publishes nothing when one does. **A release is never overwritten**: Arvo
+verifies a downloaded binary against the SHA-256 the manifest states, so
+replacing the bytes behind a published checksum is the one thing this must
+not do. To correct a release, move the version.
+
+The checksums only exist once the binaries are built, so the manifest can
+only name them after the release is cut. The release workflow opens that
+second pull request itself.

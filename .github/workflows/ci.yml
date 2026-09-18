@@ -24,6 +24,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Two numbers describe this plugin: the crate's, and the one the
+      # manifest shows in Arvo's Extensions view. A release is cut from the
+      # first, so a manifest that disagrees ships a plugin that misreports
+      # itself to the person running it.
+      - name: The version is one number
+        run: |
+          crate=$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          manifest=$(jq -r .version arvo-extension.json)
+          echo "Cargo.toml $crate, arvo-extension.json $manifest"
+          if [ "$crate" != "$manifest" ]; then
+            echo "::error file=arvo-extension.json::the manifest says $manifest and the crate says $crate"
+            exit 1
+          fi
+
+      # A merge to main publishes a release only when the version has moved,
+      # and never overwrites one that exists. Without this, a change to the
+      # plugin itself merges green and quietly publishes nothing.
+      - name: A change to the plugin moves the version
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          changed=$(gh pr diff ${{ github.event.pull_request.number }} --name-only \
+                    | grep -E '^(src/|tests/|Cargo\.(toml|lock)$)' || true)
+          if [ -z "$changed" ]; then
+            echo "nothing that ships changed; no bump needed"
+            exit 0
+          fi
+          git fetch --depth=1 origin main
+          version_of() { sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' | head -1; }
+          before=$(git show FETCH_HEAD:Cargo.toml | version_of)
+          after=$(version_of < Cargo.toml)
+          if [ "$before" = "$after" ]; then
+            echo "::error file=Cargo.toml::this changes what ships but leaves the version at $after; \
+            a merge would publish nothing, because a released version is never overwritten"
+            exit 1
+          fi
+          echo "$before -> $after"
+
       # `arvo-plugin-host` lives in a private repository, and a workflow's
       # own token only reaches the repository it runs in. Without this
       # secret the build cannot resolve its dependencies at all — see the

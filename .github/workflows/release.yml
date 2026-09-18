@@ -81,6 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -94,16 +95,17 @@ jobs:
       # just to answer what this package calls itself.
       - name: Read the version
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version=$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
           if gh release view "v${version}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${version} is already released; this run publishes nothing." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
 
       - name: Checksums
         run: |
@@ -117,36 +119,85 @@ jobs:
       # a new one; the artifacts of this run are on the run either way.
       - name: Publish
         if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ steps.version.outputs.tag }}" staged/* \
             --title "${{ steps.version.outputs.tag }}" \
             --notes "Built from ${GITHUB_SHA}. Each binary is named for the target triple it was built for; \`checksums.txt\` holds the SHA-256 Arvo verifies on install."
+
+      # An installed Arvo with no Rust toolchain takes these binaries
+      # instead of building from source (arvo-desktop#178), and it will only
+      # take them against the checksum this manifest states. The checksums
+      # exist only once the binaries are built, so the manifest can only be
+      # pointed at a release after that release is cut — which is why this
+      # is a pull request and not a thing to remember to do by hand.
+      - name: Point the manifest at these binaries
+        if: steps.version.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
-
-      # What to paste into `arvo-extension.json` so an installed Arvo takes
-      # these binaries instead of building from source.
-      - name: The manifest block for these assets
         run: |
           binary="${GITHUB_REPOSITORY##*/}"
-          tag="${{ steps.version.outputs.tag }}"
-          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}"
-          {
-            echo '### `assets` for `arvo-extension.json`'
-            echo
-            echo '```json'
-            echo '"assets": ['
-            first=1
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.version.outputs.tag }}"
+
+          assets=$(
             while read -r sum file; do
               [ "$file" = "checksums.txt" ] && continue
               target="${file#"${binary}-"}"
               target="${target%.exe}"
-              [ $first -eq 0 ] && echo ','
-              first=0
-              printf '  { "target": "%s", "url": "%s/%s", "sha256": "%s" }' \
-                "$target" "$base" "$file" "$sum"
-            done < staged/checksums.txt
-            echo
-            echo ']'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+              jq -n --arg t "$target" --arg u "${base}/${file}" --arg s "$sum" \
+                '{target: $t, url: $u, sha256: $s}'
+            done < staged/checksums.txt | jq -s '.'
+          )
+
+          # One binary is built here, so every provider would be given the
+          # same one. With more than one provider that is a guess, and a
+          # guess about which executable to download is not one to make.
+          if [ "$(jq '.contributes.providers | length' arvo-extension.json)" != "1" ]; then
+            {
+              echo '### Assets for `arvo-extension.json`'
+              echo
+              echo 'More than one provider here, so which binary belongs to which is not this'
+              echo 'workflow'"'"'s to decide. The block for these assets:'
+              echo
+              echo '```json'
+              echo "\"assets\": ${assets}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          jq --argjson assets "$assets" \
+            '.contributes.providers[0].assets = $assets' \
+            arvo-extension.json > manifest.tmp && mv manifest.tmp arvo-extension.json
+
+          if git diff --quiet -- arvo-extension.json; then
+            echo "the manifest already points at ${{ steps.version.outputs.tag }}." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          branch="assets-${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add arvo-extension.json
+          git commit \
+            -m "Point the manifest at ${{ steps.version.outputs.tag }}'s binaries" \
+            -m "The release is cut, so its checksums exist and the manifest can name them. An Arvo with no Rust toolchain installs these instead of building from source."
+          git push -q origin "$branch"
+
+          # Creating a pull request needs a repository setting that is off
+          # by default. When it is, say where to click rather than failing a
+          # release that has already been published.
+          compare="https://github.com/${GITHUB_REPOSITORY}/compare/${branch}?expand=1"
+          if gh pr create --base main --head "$branch" \
+               --title "Point the manifest at ${{ steps.version.outputs.tag }}'s binaries" \
+               --body "Cut by the release workflow. The checksums exist only once the binaries are built, so this is the pass that points \`arvo-extension.json\` at them." >> "$GITHUB_STEP_SUMMARY" 2>&1; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "Could not open the pull request — Settings → Actions → General →"
+              echo "*Allow GitHub Actions to create and approve pull requests* is off."
+              echo "The branch is pushed: [open it](${compare})."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
