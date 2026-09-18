@@ -1,0 +1,98 @@
+name: CI
+
+# Every change to main arrives through a pull request, so this is what
+# guards it: lint, build and test before anything can be merged.
+on:
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a branch makes the run in flight pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The host crate is a git dependency on a private repository, and cargo's
+  # built-in git client cannot use the credential set up below.
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Two numbers describe this plugin: the crate's, and the one the
+      # manifest shows in Arvo's Extensions view. A release is cut from the
+      # first, so a manifest that disagrees ships a plugin that misreports
+      # itself to the person running it.
+      - name: The version is one number
+        run: |
+          crate=$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          manifest=$(jq -r .version arvo-extension.json)
+          echo "Cargo.toml $crate, arvo-extension.json $manifest"
+          if [ "$crate" != "$manifest" ]; then
+            echo "::error file=arvo-extension.json::the manifest says $manifest and the crate says $crate"
+            exit 1
+          fi
+
+      # A merge to main publishes a release only when the version has moved,
+      # and never overwrites one that exists. Without this, a change to the
+      # plugin itself merges green and quietly publishes nothing.
+      - name: A change to the plugin moves the version
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          changed=$(gh pr diff ${{ github.event.pull_request.number }} --name-only \
+                    | grep -E '^(src/|tests/|Cargo\.(toml|lock)$)' || true)
+          if [ -z "$changed" ]; then
+            echo "nothing that ships changed; no bump needed"
+            exit 0
+          fi
+          git fetch --depth=1 origin main
+          version_of() { sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' | head -1; }
+          before=$(git show FETCH_HEAD:Cargo.toml | version_of)
+          after=$(version_of < Cargo.toml)
+          if [ "$before" = "$after" ]; then
+            echo "::error file=Cargo.toml::this changes what ships but leaves the version at $after; \
+            a merge would publish nothing, because a released version is never overwritten"
+            exit 1
+          fi
+          echo "$before -> $after"
+
+      # `arvo-plugin-host` lives in a private repository, and a workflow's
+      # own token only reaches the repository it runs in. Without this
+      # secret the build cannot resolve its dependencies at all — see the
+      # README for the one-time setup.
+      - name: Reach the private host crate
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ secrets.ARVO_DESKTOP_TOKEN }}@github.com/".insteadOf \
+            "https://github.com/"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Lint
+        run: |
+          rustup component add clippy
+          cargo clippy --all-targets --locked -- -D warnings
+
+      # Built and tested in release, because release is what ships: this
+      # plugin is distributed as a release binary, and a debug-only green
+      # tick would not have exercised what a person installs.
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --release --locked

@@ -1,0 +1,203 @@
+name: Release
+
+# What lands on main is what people install. Every merge builds the binary
+# for every platform Arvo runs on; a merge that also moved the version in
+# Cargo.toml publishes them as a release.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should not hide what the others produced.
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          # Both Macs: the runner is Apple silicon, and an Intel Mac is
+          # still a machine someone installs Arvo on.
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reach the private host crate
+        shell: bash
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ secrets.ARVO_DESKTOP_TOKEN }}@github.com/".insteadOf \
+            "https://github.com/"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ matrix.target }}-
+
+      - name: Build
+        shell: bash
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --locked --target ${{ matrix.target }}
+
+      # Named the way Arvo's installer looks for it: the binary, then the
+      # triple it was built for (#178 in arvo-desktop).
+      - name: Name it for the target it was built for
+        shell: bash
+        run: |
+          binary="${GITHUB_REPOSITORY##*/}"
+          suffix=""
+          [[ "${{ matrix.target }}" == *windows* ]] && suffix=".exe"
+          mkdir -p staged
+          cp "target/${{ matrix.target }}/release/${binary}${suffix}" \
+             "staged/${binary}-${{ matrix.target }}${suffix}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: staged/*
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          merge-multiple: true
+
+      # The version in Cargo.toml is the release. Read with sed rather than
+      # `cargo metadata`, which would want the private dependency resolved
+      # just to answer what this package calls itself.
+      - name: Read the version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          if gh release view "v${version}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${version} is already released; this run publishes nothing." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checksums
+        run: |
+          cd staged
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      # A release already published is never overwritten: someone may have
+      # installed from it, and Arvo checks these binaries against the
+      # checksum its manifest states. Move the version in Cargo.toml to cut
+      # a new one; the artifacts of this run are on the run either way.
+      - name: Publish
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" staged/* \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes "Built from ${GITHUB_SHA}. Each binary is named for the target triple it was built for; \`checksums.txt\` holds the SHA-256 Arvo verifies on install."
+
+      # An installed Arvo with no Rust toolchain takes these binaries
+      # instead of building from source (arvo-desktop#178), and it will only
+      # take them against the checksum this manifest states. The checksums
+      # exist only once the binaries are built, so the manifest can only be
+      # pointed at a release after that release is cut — which is why this
+      # is a pull request and not a thing to remember to do by hand.
+      - name: Point the manifest at these binaries
+        if: steps.version.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          binary="${GITHUB_REPOSITORY##*/}"
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.version.outputs.tag }}"
+
+          assets=$(
+            while read -r sum file; do
+              [ "$file" = "checksums.txt" ] && continue
+              target="${file#"${binary}-"}"
+              target="${target%.exe}"
+              jq -n --arg t "$target" --arg u "${base}/${file}" --arg s "$sum" \
+                '{target: $t, url: $u, sha256: $s}'
+            done < staged/checksums.txt | jq -s '.'
+          )
+
+          # One binary is built here, so every provider would be given the
+          # same one. With more than one provider that is a guess, and a
+          # guess about which executable to download is not one to make.
+          if [ "$(jq '.contributes.providers | length' arvo-extension.json)" != "1" ]; then
+            {
+              echo '### Assets for `arvo-extension.json`'
+              echo
+              echo 'More than one provider here, so which binary belongs to which is not this'
+              echo 'workflow'"'"'s to decide. The block for these assets:'
+              echo
+              echo '```json'
+              echo "\"assets\": ${assets}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          jq --argjson assets "$assets" \
+            '.contributes.providers[0].assets = $assets' \
+            arvo-extension.json > manifest.tmp && mv manifest.tmp arvo-extension.json
+
+          if git diff --quiet -- arvo-extension.json; then
+            echo "the manifest already points at ${{ steps.version.outputs.tag }}." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          branch="assets-${{ steps.version.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add arvo-extension.json
+          git commit \
+            -m "Point the manifest at ${{ steps.version.outputs.tag }}'s binaries" \
+            -m "The release is cut, so its checksums exist and the manifest can name them. An Arvo with no Rust toolchain installs these instead of building from source."
+          git push -q origin "$branch"
+
+          # Creating a pull request needs a repository setting that is off
+          # by default. When it is, say where to click rather than failing a
+          # release that has already been published.
+          compare="https://github.com/${GITHUB_REPOSITORY}/compare/${branch}?expand=1"
+          if gh pr create --base main --head "$branch" \
+               --title "Point the manifest at ${{ steps.version.outputs.tag }}'s binaries" \
+               --body "Cut by the release workflow. The checksums exist only once the binaries are built, so this is the pass that points \`arvo-extension.json\` at them." >> "$GITHUB_STEP_SUMMARY" 2>&1; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "Could not open the pull request — Settings → Actions → General →"
+              echo "*Allow GitHub Actions to create and approve pull requests* is off."
+              echo "The branch is pushed: [open it](${compare})."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

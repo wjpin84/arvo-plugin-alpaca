@@ -101,3 +101,40 @@ The one test starts the plugin in-process and discovers it the way Arvo does,
 twice: with no grant, where every source reports not connected and a fetch is
 refused as no session before any request leaves the machine; and with a key
 pair, where every source is connected for that call. It touches no network.
+
+## Continuous integration
+
+Every pull request runs lint, build and test; `main` takes nothing else.
+A merge to `main` builds the binary for Windows, Linux and both Macs, and
+publishes them as a release when the version in `Cargo.toml` has moved. A
+release that exists is never overwritten — someone may have installed from
+it, and Arvo checks these binaries against the checksum a manifest states.
+
+The workflows need one secret, because the host crates are git dependencies
+on a private repository and a workflow's own token only reaches the
+repository it runs in:
+
+| Secret | What |
+| --- | --- |
+| `ARVO_DESKTOP_TOKEN` | A fine-grained personal access token with read access to `wjpin84/arvo-desktop` contents |
+
+Set it with `gh secret set ARVO_DESKTOP_TOKEN --repo wjpin84/REPO`. Without
+it the build cannot resolve its dependencies, and it is also why a pull
+request from a fork cannot be built: a fork's run gets no secrets.
+
+### Versioning
+
+`version` in `Cargo.toml` is the only number that decides anything. CI
+refuses a pull request where it disagrees with `arvo-extension.json` — that
+is the number Arvo's Extensions view shows — and refuses one that changes
+`src`, `tests` or the manifests without moving it.
+
+A merge to `main` publishes `v<version>` when no such release exists, and
+publishes nothing when one does. **A release is never overwritten**: Arvo
+verifies a downloaded binary against the SHA-256 the manifest states, so
+replacing the bytes behind a published checksum is the one thing this must
+not do. To correct a release, move the version.
+
+The checksums only exist once the binaries are built, so the manifest can
+only name them after the release is cut. The release workflow opens that
+second pull request itself.
